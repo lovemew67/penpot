@@ -1,5 +1,3 @@
-use std::io::Cursor;
-
 use crate::math::{Matrix, Point, Rect};
 use crate::mem;
 use crate::shapes::{Paragraph, Shape, TextContent, Type, VerticalAlign};
@@ -119,6 +117,37 @@ pub extern "C" fn text_editor_poll_event() -> u8 {
 // SELECTION MANAGEMENT
 // ============================================================================
 
+fn get_shape_relative_point(point: Point, view_matrix: Matrix, shape_matrix: Matrix) -> Option<Point> {
+    let Some(inv_view_matrix) = view_matrix.invert() else {
+        return None;
+    };
+    let Some(inv_shape_matrix) = shape_matrix.invert() else {
+        return None;
+    };
+    let transform_matrix: Matrix = Matrix::concat(&inv_shape_matrix, &inv_view_matrix);
+    let shape_relative_point = transform_matrix.map_point(point);
+    Some(shape_relative_point)
+}
+
+#[no_mangle]
+pub extern "C" fn text_editor_testing_coords(x: f32, y: f32) {
+    with_state_mut!(state, {
+        let view_matrix: Matrix = state.render_state.viewbox.get_matrix();
+        let point = Point::new(x, y);
+        let Some(shape_id) = state.text_editor_state.active_shape_id else {
+            return;
+        };
+        let Some(shape) = state.shapes.get(&shape_id) else {
+            return;
+        };
+        let shape_matrix = shape.get_matrix();
+        let Some(shape_rel_point) = get_shape_relative_point(point, view_matrix, shape_matrix) else {
+            return;
+        };
+        // println!("testing_coords::shape_rel_point {:?}", shape_rel_point);
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn text_editor_set_cursor_from_point(x: f32, y: f32) {
     with_state_mut!(state, {
@@ -126,44 +155,26 @@ pub extern "C" fn text_editor_set_cursor_from_point(x: f32, y: f32) {
             return;
         }
 
+        let view_matrix: Matrix = state.render_state.viewbox.get_matrix();
+        let point = Point::new(x, y);
         let Some(shape_id) = state.text_editor_state.active_shape_id else {
             return;
         };
-
-        let (shape_matrix, view_matrix, selrect, vertical_align) = {
-            let Some(shape) = state.shapes.get(&shape_id) else {
-                return;
-            };
-            (
-                shape.get_concatenated_matrix(&state.shapes),
-                state.render_state.viewbox.get_matrix(),
-                shape.selrect(),
-                shape.vertical_align(),
-            )
+        let Some(shape) = state.shapes.get(&shape_id) else {
+            return;
         };
-
-        let Some(inv_view_matrix) = view_matrix.invert() else {
+        let shape_matrix = shape.get_matrix();
+        let Some(shape_rel_point) = get_shape_relative_point(point, view_matrix, shape_matrix) else {
             return;
         };
 
-        let Some(inv_shape_matrix) = shape_matrix.invert() else {
+        let Type::Text(text_content) = &shape.shape_type else {
             return;
         };
 
-        let mut matrix = Matrix::new_identity();
-        matrix.post_concat(&inv_view_matrix);
-        matrix.post_concat(&inv_shape_matrix);
+        println!("cursor_from_point::shape_rel_point {:?}", shape_rel_point);
 
-        let mapped_point = matrix.map_point(Point::new(x, y));
-
-        let Some(shape) = state.shapes.get_mut(&shape_id) else {
-            return;
-        };
-
-        let Type::Text(text_content) = &mut shape.shape_type else {
-            return;
-        };
-
+        /*
         if text_content.layout.paragraphs.is_empty() && !text_content.paragraphs().is_empty() {
             let bounds = text_content.bounds;
             text_content.update_layout(bounds);
@@ -171,7 +182,7 @@ pub extern "C" fn text_editor_set_cursor_from_point(x: f32, y: f32) {
 
         // Calculate vertical alignment offset (same as in render/text_editor.rs)
         let layout_paragraphs: Vec<_> = text_content.layout.paragraphs.iter().flatten().collect();
-        let total_height: f32 = layout_paragraphs.iter().map(|p| p.height()).sum();
+        let _total_height: f32 = layout_paragraphs.iter().map(|p| p.height()).sum();
         let vertical_offset = match vertical_align {
             crate::shapes::VerticalAlign::Center => (selrect.height() - total_height) / 2.0,
             crate::shapes::VerticalAlign::Bottom => selrect.height() - total_height,
@@ -184,8 +195,9 @@ pub extern "C" fn text_editor_set_cursor_from_point(x: f32, y: f32) {
             mapped_point.x - selrect.x(),
             mapped_point.y - selrect.y() - vertical_offset,
         );
-
-        if let Some(position) = text_content.get_caret_position_at(&adjusted_point) {
+        */
+        if let Some(position) = text_content.get_caret_position_at(&shape_rel_point) {
+            println!("cursor_from_point::position {:?}", position);
             state.text_editor_state.set_caret_from_position(position);
         }
     });
@@ -218,13 +230,15 @@ pub extern "C" fn text_editor_extend_selection_to_point(x: f32, y: f32) {
             return;
         };
 
+        /*
         let Some(inv_shape_matrix) = shape_matrix.invert() else {
             return;
         };
+        */
 
         let mut matrix = Matrix::new_identity();
         matrix.post_concat(&inv_view_matrix);
-        matrix.post_concat(&inv_shape_matrix);
+        matrix.post_concat(&shape_matrix);
 
         let mapped_point = matrix.map_point(Point::new(x, y));
 
@@ -243,7 +257,8 @@ pub extern "C" fn text_editor_extend_selection_to_point(x: f32, y: f32) {
 
         // Calculate vertical alignment offset (same as in render/text_editor.rs)
         let layout_paragraphs: Vec<_> = text_content.layout.paragraphs.iter().flatten().collect();
-        let total_height: f32 = layout_paragraphs.iter().map(|p| p.height()).sum();
+        let _total_height: f32 = layout_paragraphs.iter().map(|p| p.height()).sum();
+        /*
         let vertical_offset = match vertical_align {
             crate::shapes::VerticalAlign::Center => (selrect.height() - total_height) / 2.0,
             crate::shapes::VerticalAlign::Bottom => selrect.height() - total_height,
@@ -255,8 +270,9 @@ pub extern "C" fn text_editor_extend_selection_to_point(x: f32, y: f32) {
             mapped_point.x - selrect.x(),
             mapped_point.y - selrect.y() - vertical_offset,
         );
+        */
 
-        if let Some(position) = text_content.get_caret_position_at(&adjusted_point) {
+        if let Some(position) = text_content.get_caret_position_at(&mapped_point) {
             state
                 .text_editor_state
                 .extend_selection_from_position(position);

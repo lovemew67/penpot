@@ -41,7 +41,11 @@ fn render_cursor(canvas: &Canvas, editor_state: &TextEditorState, text_content: 
     paint.set_color(editor_state.theme.cursor_color);
     paint.set_anti_alias(true);
 
+    let shape_matrix = shape.get_matrix();
+    canvas.save();
+    canvas.concat(&shape_matrix);
     canvas.draw_rect(rect, &paint);
+    canvas.restore();
 }
 
 fn render_selection(
@@ -94,8 +98,6 @@ fn calculate_cursor_rect(
     if cursor.paragraph >= layout_paragraphs.len() {
         return None;
     }
-
-    let selrect = shape.selrect();
 
     let mut y_offset = vertical_align_offset(shape, &layout_paragraphs);
     for (idx, laid_out_para) in layout_paragraphs.iter().enumerate() {
@@ -153,8 +155,8 @@ fn calculate_cursor_rect(
             };
 
             return Some(Rect::from_xywh(
-                selrect.x() + cursor_x,
-                selrect.y() + y_offset,
+                cursor_x,
+                y_offset,
                 editor_state.theme.cursor_width,
                 cursor_height,
             ));
