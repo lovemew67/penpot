@@ -85,6 +85,15 @@
   (let [cursor (.-selectionStart input-node)]
     (extract-partial-token value cursor)))
 
+(defn remove-self-token [filtered-options current-token]
+  (let [group (:type current-token)
+        current-id (:id current-token)
+        filtered-options (deref filtered-options)]
+    (update filtered-options group
+            (fn [options]
+              (remove #(= (:id %) current-id) options)))))
+
+
 (defn- select-option-by-id
   [id options-ref input-node value]
   (let [cursor     (.-selectionStart input-node)
@@ -126,6 +135,7 @@
   [{:keys [name tokens token token-type empty-to-end ref] :rest props}]
 
   (let [form              (mf/use-ctx fc/context)
+        _ (prn "token" token)
 
         input-name        name
         token-name        (get-in @form [:data :name] nil)
@@ -163,9 +173,15 @@
         (mf/with-memo [raw-tokens-by-type token-type]
           (csu/filter-tokens-for-input raw-tokens-by-type token-type))
 
+        visible-options
+        (mf/with-memo [filtered-tokens-by-type token]
+          (if token
+            (remove-self-token filtered-tokens-by-type token)
+            filtered-tokens-by-type))
+
         dropdown-options
-        (mf/with-memo [filtered-tokens-by-type filter-term]
-          (csu/get-token-dropdown-options filtered-tokens-by-type (str "{" filter-term)))
+        (mf/with-memo [visible-options filter-term]
+          (csu/get-token-dropdown-options visible-options (str "{" filter-term)))
 
         set-option-ref
         (mf/use-fn
