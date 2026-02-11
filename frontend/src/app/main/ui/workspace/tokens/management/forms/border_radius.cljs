@@ -7,7 +7,6 @@
 
 (ns app.main.ui.workspace.tokens.management.forms.border-radius
   (:require
-   [app.common.types.token :as cto]
    [app.main.ui.workspace.tokens.management.forms.controls :as token.controls]
    [app.main.ui.workspace.tokens.management.forms.generic-form :as generic]
    [rumext.v2 :as mf]))
@@ -15,12 +14,7 @@
 
 (mf/defc form*
   [{:keys [token token-type] :rest props}]
-  (let [token
-        (mf/with-memo [token]
-          (if token
-            (update token :value cto/join-font-family)
-            {:type token-type}))
-        props (mf/spread-props props {:token token
+  (let [props (mf/spread-props props {:token token
                                       :token-type token-type
                                       :input-component token.controls/combobox*})]
     [:> generic/form* props]))

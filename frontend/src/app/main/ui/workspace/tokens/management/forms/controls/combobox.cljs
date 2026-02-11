@@ -60,21 +60,26 @@
 
 (defn replace-active-token
   [value cursor new-name]
-  (let [before (subs value 0 cursor)
-        start  (str/last-index-of before "{")]
-    (if start
 
-      (let [after-start (subs value start)
+  (let [before     (subs value 0 cursor)
+        last-open  (str/last-index-of before "{")
+        last-close (str/last-index-of before "}")]
+
+    (if (and last-open
+             (or (nil? last-close)
+                 (> last-open last-close)))
+
+      (let [after-start (subs value last-open)
             close-pos   (str/index-of after-start "}")
             end         (if close-pos
-                          (+ start close-pos 1)
+                          (+ last-open close-pos 1)
                           cursor)]
-        (str (subs value 0 start)
+        (str (subs value 0 last-open)
              "{" new-name "}"
              (subs value end)))
-
       (str (subs value 0 cursor)
-           "{" new-name "}"))))
+           "{" new-name "}"
+           (subs value cursor)))))
 
 (defn active-token [value input-node]
   (let [cursor (.-selectionStart input-node)]
@@ -128,7 +133,6 @@
         is-open*          (mf/use-state false)
         is-open           (deref is-open*)
 
-
         listbox-id        (mf/use-id)
         filter-term*      (mf/use-state "")
         filter-term       (deref filter-term*)
@@ -179,7 +183,6 @@
            (dom/prevent-default event)
            (swap! is-open* not)))
 
-
         resolve-stream
         (mf/with-memo [token]
           (if (contains? token :value)
@@ -196,14 +199,14 @@
 
              (fm/on-input-change form input-name value)
              (rx/push! resolve-stream value)
-             
-               (if token
-                 (do
-                   (reset! is-open* true)
-                   (reset! filter-term* (:partial token)))
-                 (do
-                   (reset! is-open* false)
-                   (reset! filter-term* ""))))))
+
+             (if token
+               (do
+                 (reset! is-open* true)
+                 (reset! filter-term* (:partial token)))
+               (do
+                 (reset! is-open* false)
+                 (reset! filter-term* ""))))))
 
         on-option-click
         (mf/use-fn
