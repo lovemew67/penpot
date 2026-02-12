@@ -65,9 +65,14 @@ fn render_selection(
     paint.set_blend_mode(BlendMode::Multiply);
     paint.set_color(editor_state.theme.selection_color);
     paint.set_anti_alias(true);
+
+    let shape_matrix = shape.get_matrix();
+    canvas.save();
+    canvas.concat(&shape_matrix);
     for rect in rects {
         canvas.draw_rect(rect, &paint);
     }
+    canvas.restore();
 }
 
 fn vertical_align_offset(
@@ -180,7 +185,6 @@ fn calculate_selection_rects(
     let paragraphs = text_content.paragraphs();
     let layout_paragraphs: Vec<_> = text_content.layout.paragraphs.iter().flatten().collect();
 
-    let selrect = shape.selrect();
     let mut y_offset = vertical_align_offset(shape, &layout_paragraphs);
 
     for (para_idx, laid_out_para) in layout_paragraphs.iter().enumerate() {
@@ -223,8 +227,8 @@ fn calculate_selection_rects(
             for text_box in text_boxes {
                 let r = text_box.rect;
                 rects.push(Rect::from_xywh(
-                    selrect.x() + r.left(),
-                    selrect.y() + y_offset + r.top(),
+                    r.left(),
+                    y_offset + r.top(),
                     r.width(),
                     r.height(),
                 ));

@@ -118,6 +118,7 @@ pub struct TextPositionWithAffinity {
     pub paragraph: i32,
     #[allow(dead_code)]
     pub span: i32,
+    pub span_relative_offset: i32,
     pub offset: i32,
 }
 
@@ -126,12 +127,14 @@ impl TextPositionWithAffinity {
         position_with_affinity: PositionWithAffinity,
         paragraph: i32,
         span: i32,
+        span_relative_offset: i32,
         offset: i32,
     ) -> Self {
         Self {
             position_with_affinity,
             paragraph,
             span,
+            span_relative_offset,
             offset,
         }
     }
@@ -421,7 +424,7 @@ impl TextContent {
         self.bounds = Rect::from_ltrb(p1.x, p1.y, p2.x, p2.y);
     }
 
-    pub fn get_caret_position_at(&self, point: &Point) -> Option<TextPositionWithAffinity> {
+    pub fn get_caret_position_from_shape_coords(&self, point: &Point) -> Option<TextPositionWithAffinity> {
         let mut offset_y = 0.0;
         let layout_paragraphs = self.layout.paragraphs.iter().flatten();
 
@@ -487,6 +490,7 @@ impl TextContent {
                         paragraph_index,
                         span_index,
                         span_offset,
+                        position_with_affinity.position,
                     ));
                 }
             }
@@ -509,10 +513,20 @@ impl TextContent {
                 0, // paragraph 0
                 0, // span 0
                 0, // offset 0
+                0,
             ));
         }
 
         None
+    }
+
+    pub fn get_caret_position_from_screen_coords(&self, point: &Point, view_matrix: &Matrix, shape_matrix: &Matrix) -> Option<TextPositionWithAffinity> {
+        let Some(shape_rel_point) = Shape::get_relative_point(&point, &view_matrix, &shape_matrix) else {
+            return None;
+        };
+
+        println!("cursor_from_point::shape_rel_point {:?}", shape_rel_point);
+        self.get_caret_position_from_shape_coords(&shape_rel_point)
     }
 
     /// Builds the ParagraphBuilders necessary to render

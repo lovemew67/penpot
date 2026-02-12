@@ -117,18 +117,6 @@ pub extern "C" fn text_editor_poll_event() -> u8 {
 // SELECTION MANAGEMENT
 // ============================================================================
 
-fn get_shape_relative_point(point: Point, view_matrix: Matrix, shape_matrix: Matrix) -> Option<Point> {
-    let Some(inv_view_matrix) = view_matrix.invert() else {
-        return None;
-    };
-    let Some(inv_shape_matrix) = shape_matrix.invert() else {
-        return None;
-    };
-    let transform_matrix: Matrix = Matrix::concat(&inv_shape_matrix, &inv_view_matrix);
-    let shape_relative_point = transform_matrix.map_point(point);
-    Some(shape_relative_point)
-}
-
 #[no_mangle]
 pub extern "C" fn text_editor_testing_coords(x: f32, y: f32) {
     with_state_mut!(state, {
@@ -141,10 +129,37 @@ pub extern "C" fn text_editor_testing_coords(x: f32, y: f32) {
             return;
         };
         let shape_matrix = shape.get_matrix();
-        let Some(shape_rel_point) = get_shape_relative_point(point, view_matrix, shape_matrix) else {
+        let Some(shape_rel_point) = Shape::get_relative_point(&point, &view_matrix, &shape_matrix) else {
             return;
         };
         // println!("testing_coords::shape_rel_point {:?}", shape_rel_point);
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn text_editor_pointer_down(x: f32, y: f32) {
+    with_state_mut!(state, {
+        if !state.text_editor_state.is_active {
+            return;
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn text_editor_pointer_move(x: f32, y: f32) {
+    with_state_mut!(state, {
+        if !state.text_editor_state.is_active {
+            return;
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn text_editor_pointer_up(x: f32, y: f32) {
+    with_state_mut!(state, {
+        if !state.text_editor_state.is_active {
+            return;
+        }
     });
 }
 
@@ -164,16 +179,9 @@ pub extern "C" fn text_editor_set_cursor_from_point(x: f32, y: f32) {
             return;
         };
         let shape_matrix = shape.get_matrix();
-        let Some(shape_rel_point) = get_shape_relative_point(point, view_matrix, shape_matrix) else {
-            return;
-        };
-
         let Type::Text(text_content) = &shape.shape_type else {
             return;
         };
-
-        println!("cursor_from_point::shape_rel_point {:?}", shape_rel_point);
-
         /*
         if text_content.layout.paragraphs.is_empty() && !text_content.paragraphs().is_empty() {
             let bounds = text_content.bounds;
@@ -196,7 +204,7 @@ pub extern "C" fn text_editor_set_cursor_from_point(x: f32, y: f32) {
             mapped_point.y - selrect.y() - vertical_offset,
         );
         */
-        if let Some(position) = text_content.get_caret_position_at(&shape_rel_point) {
+        if let Some(position) = text_content.get_caret_position_from_screen_coords(&point, &view_matrix, &shape_matrix) {
             println!("cursor_from_point::position {:?}", position);
             state.text_editor_state.set_caret_from_position(position);
         }
@@ -272,11 +280,13 @@ pub extern "C" fn text_editor_extend_selection_to_point(x: f32, y: f32) {
         );
         */
 
+        /*
         if let Some(position) = text_content.get_caret_position_at(&mapped_point) {
             state
                 .text_editor_state
                 .extend_selection_from_position(position);
         }
+        */
     });
 }
 

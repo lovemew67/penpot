@@ -85,6 +85,9 @@
 (def text-editor-stop text-editor/text-editor-stop)
 (def text-editor-testing-coords text-editor/text-editor-testing-coords)
 (def text-editor-set-cursor-from-point text-editor/text-editor-set-cursor-from-point)
+(def text-editor-pointer-down text-editor/text-editor-pointer-down)
+(def text-editor-pointer-move text-editor/text-editor-pointer-move)
+(def text-editor-pointer-up text-editor/text-editor-pointer-up)
 (def text-editor-is-active? text-editor/text-editor-is-active?)
 (def text-editor-sync-content text-editor/text-editor-sync-content)
 
