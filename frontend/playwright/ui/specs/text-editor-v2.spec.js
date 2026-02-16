@@ -104,6 +104,7 @@ test("Update an already created text shape by prepending text", async ({
   await workspace.clickLeafLayer("Lorem ipsum");
   await workspace.textEditor.startEditing();
   await workspace.textEditor.moveFromStart(0);
+  await page.evaluate(() => new Promise((resolve) => globalThis.requestIdleCallback(resolve)));
   await page.keyboard.type("Dolor sit amet ");
   const textContent = await workspace.textEditor.waitForTextSpanContent();
   expect(textContent).toBe("Dolor sit amet Lorem ipsum");
