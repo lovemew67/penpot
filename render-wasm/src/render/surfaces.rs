@@ -115,6 +115,13 @@ impl Surfaces {
         self.tiles.clear();
     }
 
+    /// Soft-clear tiles: marks all tiles as needing re-render but keeps their
+    /// textures available for visual fallback via `draw_cached_tile_surface`.
+    /// This avoids the visual "pop" when transitioning between quality levels.
+    pub fn soft_clear_tiles(&mut self) {
+        self.tiles.soft_clear();
+    }
+
     pub fn resize(&mut self, gpu_state: &mut GpuState, new_width: i32, new_height: i32) {
         self.reset_from_target(gpu_state.create_target_surface(new_width, new_height));
     }
@@ -461,6 +468,29 @@ impl Surfaces {
         }
     }
 
+    /// Draws a cached tile even if it was soft-removed, for visual fallback
+    /// during quality transitions. Returns true if a fallback tile was drawn.
+    pub fn draw_cached_tile_fallback(
+        &mut self,
+        tile: Tile,
+        rect: skia::Rect,
+        color: skia::Color,
+    ) -> bool {
+        if let Some(image) = self.tiles.get_even_if_removed(tile) {
+            let mut paint = skia::Paint::default();
+            paint.set_color(color);
+
+            self.target.canvas().draw_rect(rect, &paint);
+
+            self.target
+                .canvas()
+                .draw_image_rect(&image, None, rect, &skia::Paint::default());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Draws the current tile directly to the target and cache surfaces without
     /// creating a snapshot. This avoids GPU stalls from ReadPixels but doesn't
     /// populate the tile texture cache (suitable for one-shot renders like tests).
@@ -534,6 +564,7 @@ impl TileTextureCache {
         for tile in self.removed.iter() {
             self.grid.remove(tile);
         }
+        self.removed.clear();
     }
 
     fn free_tiles(&mut self, tile_viewbox: &TileViewbox) {
@@ -579,13 +610,29 @@ impl TileTextureCache {
         self.grid.get_mut(&tile)
     }
 
+    /// Returns the tile texture even if it was soft-removed.
+    /// Used for visual fallback during quality transitions.
+    pub fn get_even_if_removed(&mut self, tile: Tile) -> Option<&mut skia::Image> {
+        self.grid.get_mut(&tile)
+    }
+
     pub fn remove(&mut self, tile: Tile) {
         self.removed.insert(tile);
     }
 
-    pub fn clear(&mut self) {
+    /// Soft-clear marks every tile as removed (so `has()` returns false and
+    /// tiles will be re-rendered) but keeps the textures in `grid` so that
+    /// `get()` can still return them when used explicitly for visual fallback.
+    /// Use this when transitioning between quality levels so that old tiles
+    /// remain visible until replaced by higher-quality versions.
+    pub fn soft_clear(&mut self) {
         for k in self.grid.keys() {
             self.removed.insert(*k);
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.grid.clear();
+        self.removed.clear();
     }
 }

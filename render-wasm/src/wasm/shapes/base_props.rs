@@ -7,6 +7,8 @@ use crate::wasm::layouts::constraints::{RawConstraintH, RawConstraintV};
 use crate::{with_state_mut, STATE};
 
 use super::RawShapeType;
+use crate::shapes::Blur;
+use crate::wasm::blurs::RawBlurType;
 
 const FLAG_CLIP_CONTENT: u8 = 0b0000_0001;
 const FLAG_HIDDEN: u8 = 0b0000_0010;
@@ -59,6 +61,12 @@ pub struct RawBasePropsData {
     corner_r2: f32,
     corner_r3: f32,
     corner_r4: f32,
+    // Blur fields (8 bytes)
+    // hidden (u8), blur_type (u8), padding (2 bytes), value (f32)
+    blur_hidden: u8,
+    blur_type: u8,
+    blur_padding: [u8; 2],
+    blur_value: f32,
 }
 
 impl RawBasePropsData {
@@ -95,6 +103,17 @@ impl RawBasePropsData {
             None
         } else {
             Some(RawConstraintV::from(self.constraint_v).into())
+        }
+    }
+
+    fn blur(&self) -> Option<Blur> {
+        // Only LayerBlur is currently supported; hidden indicated by blur_hidden != 0
+        if self.blur_value > 0.0 {
+            let hidden = self.blur_hidden != 0;
+            let blur_type = RawBlurType::from(self.blur_type).into();
+            Some(Blur::new(blur_type, hidden, self.blur_value))
+        } else {
+            None
         }
     }
 }
@@ -149,6 +168,8 @@ pub extern "C" fn set_shape_base_props() {
                 raw.selrect_y2,
             );
             shape.set_corners((raw.corner_r1, raw.corner_r2, raw.corner_r3, raw.corner_r4));
+            // Apply blur if present in the batched data
+            shape.set_blur(raw.blur());
         }
     });
 }
@@ -169,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_raw_base_props_layout() {
-        assert_eq!(RAW_BASE_PROPS_SIZE, 104);
+        assert_eq!(RAW_BASE_PROPS_SIZE, 112);
         assert_eq!(std::mem::align_of::<RawBasePropsData>(), 4);
     }
 
@@ -189,6 +210,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(RawBasePropsData, transform_a), 48);
         assert_eq!(std::mem::offset_of!(RawBasePropsData, selrect_x1), 72);
         assert_eq!(std::mem::offset_of!(RawBasePropsData, corner_r1), 88);
+        assert_eq!(std::mem::offset_of!(RawBasePropsData, blur_hidden), 104);
+        assert_eq!(std::mem::offset_of!(RawBasePropsData, blur_value), 108);
     }
 
     #[test]

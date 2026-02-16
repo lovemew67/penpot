@@ -11,10 +11,12 @@ pub fn render_fill_inner_shadows(
     shape: &Shape,
     antialias: bool,
     surface_id: SurfaceId,
+    max_blur: Option<f32>,
 ) {
     if shape.has_fills() {
         for shadow in shape.inner_shadows_visible() {
-            render_fill_inner_shadow(render_state, shape, shadow, antialias, surface_id);
+            let shadow = clamp_shadow_blur(shadow, max_blur);
+            render_fill_inner_shadow(render_state, shape, &shadow, antialias, surface_id);
         }
     }
 }
@@ -36,9 +38,11 @@ pub fn render_stroke_inner_shadows(
     stroke: &Stroke,
     antialias: bool,
     surface_id: SurfaceId,
+    max_blur: Option<f32>,
 ) {
     if !shape.has_fills() {
         for shadow in shape.inner_shadows_visible() {
+            let shadow = clamp_shadow_blur(shadow, max_blur);
             let filter = shadow.get_inner_shadow_filter();
             strokes::render_single(
                 render_state,
@@ -164,5 +168,16 @@ pub fn render_text_shadows(
         }
 
         canvas.restore();
+    }
+}
+
+fn clamp_shadow_blur(shadow: &Shadow, max_blur: Option<f32>) -> Shadow {
+    match max_blur {
+        Some(max) if shadow.blur > max => {
+            let mut clamped = *shadow;
+            clamped.blur = max;
+            clamped
+        }
+        _ => *shadow,
     }
 }

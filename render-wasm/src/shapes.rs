@@ -196,6 +196,10 @@ pub struct Shape {
     pub extrect_cache: RefCell<Option<(math::Rect, u32)>>,
     pub svg_transform: Option<Matrix>,
     pub ignore_constraints: bool,
+    /// Cached `ImageFilter` for the unit-scale blur (`scale = 1.0`).
+    /// Invalidated whenever `set_blur` is called.  Keyed by the blur
+    /// parameters so a stale entry is never returned.
+    cached_image_filter: RefCell<Option<(Blur, skia::ImageFilter)>>,
 }
 
 // Returns all ancestor shapes of this shape, traversing up the parent hierarchy
@@ -284,6 +288,7 @@ impl Shape {
             extrect_cache: RefCell::new(None),
             svg_transform: None,
             ignore_constraints: false,
+            cached_image_filter: RefCell::new(None),
         }
     }
 
@@ -296,6 +301,8 @@ impl Shape {
 
         if let Some(blur) = self.blur.as_mut() {
             blur.scale_content(value);
+            // Invalidate cached filter since blur value changed
+            *self.cached_image_filter.borrow_mut() = None;
         }
 
         self.layout_item
@@ -604,6 +611,8 @@ impl Shape {
 
     pub fn set_blur(&mut self, blur: Option<Blur>) {
         self.invalidate_extrect();
+        // Invalidate the cached ImageFilter when blur parameters change
+        *self.cached_image_filter.borrow_mut() = None;
         self.blur = blur;
     }
 
@@ -652,6 +661,11 @@ impl Shape {
     pub fn add_stroke(&mut self, s: Stroke) {
         self.invalidate_extrect();
         self.strokes.push(s)
+    }
+
+    pub fn set_strokes(&mut self, strokes: Vec<Stroke>) {
+        self.invalidate_extrect();
+        self.strokes = strokes;
     }
 
     pub fn set_stroke_fill(&mut self, f: Fill) -> Result<(), String> {
@@ -740,8 +754,17 @@ impl Shape {
         self.calculate_extrect(shapes_pool, scale)
     }
 
+    /// Check if shape is too small to be visually relevant at the given scale.
+    /// Prefer `visually_insignificant_with_extrect` if you already have a computed extrect.
+    #[allow(dead_code)]
     pub fn visually_insignificant(&self, scale: f32, shapes_pool: ShapesPoolRef) -> bool {
         let extrect = self.extrect(shapes_pool, scale);
+        self.visually_insignificant_with_extrect(scale, &extrect)
+    }
+
+    /// Check if shape is too small to be visually relevant, using a precomputed extrect.
+    /// This avoids redundant extrect computation when the caller already has one.
+    pub fn visually_insignificant_with_extrect(&self, scale: f32, extrect: &math::Rect) -> bool {
         extrect.width() * scale < MIN_VISIBLE_SIZE && extrect.height() * scale < MIN_VISIBLE_SIZE
     }
 
@@ -872,6 +895,11 @@ impl Shape {
     }
 
     fn apply_shadow_bounds(&self, bounds: Bounds) -> Bounds {
+        // Fast path: skip when no shadows exist
+        if self.shadows.is_empty() {
+            return bounds;
+        }
+
         let mut rect = bounds.to_rect();
         for shadow in self.shadows_visible() {
             if !shadow.hidden() {
@@ -885,6 +913,12 @@ impl Shape {
     }
 
     fn apply_blur_bounds(&self, bounds: Bounds) -> Bounds {
+        // Fast path: skip when no active blur (most common case)
+        match self.blur {
+            Some(b) if !b.hidden => {}
+            _ => return bounds,
+        }
+
         let mut rect = bounds.to_rect();
         let image_filter = self.image_filter(1.);
         if let Some(image_filter) = image_filter {
@@ -956,7 +990,6 @@ impl Shape {
     }
 
     pub fn apply_children_blur(&self, bounds: Bounds, tree: ShapesPoolRef) -> Bounds {
-        let mut rect = bounds.to_rect();
         let mut children_blur = 0.0;
         let mut current_parent_id = self.parent_id;
 
@@ -983,6 +1016,12 @@ impl Shape {
             }
         }
 
+        // Short-circuit: no parent has a layer blur, skip Skia filter creation entirely
+        if children_blur == 0.0 {
+            return bounds;
+        }
+
+        let mut rect = bounds.to_rect();
         let blur = skia::image_filters::blur((children_blur, children_blur), None, None, None);
         if let Some(image_filter) = blur {
             let blur_bounds = image_filter.compute_fast_bounds(rect);
@@ -1212,16 +1251,39 @@ impl Shape {
     }
 
     pub fn image_filter(&self, scale: f32) -> Option<skia::ImageFilter> {
-        self.blur
-            .filter(|blur| !blur.hidden)
-            .and_then(|blur| match blur.blur_type {
-                BlurType::LayerBlur => skia::image_filters::blur(
-                    (blur.value * scale, blur.value * scale),
-                    None,
-                    None,
-                    None,
-                ),
-            })
+        let blur = self.blur.filter(|b| !b.hidden)?;
+
+        // Fast path: for the most common case (scale == 1.0) use the cached filter.
+        if scale == 1.0 {
+            let cache = self.cached_image_filter.borrow();
+            if let Some((cached_blur, ref filter)) = *cache {
+                if cached_blur == blur {
+                    return Some(filter.clone());
+                }
+            }
+            drop(cache);
+
+            // Compute and cache
+            let filter = match blur.blur_type {
+                BlurType::LayerBlur => {
+                    skia::image_filters::blur((blur.value, blur.value), None, None, None)
+                }
+            };
+            if let Some(ref f) = filter {
+                *self.cached_image_filter.borrow_mut() = Some((blur, f.clone()));
+            }
+            return filter;
+        }
+
+        // Non-unit scale: compute directly (rare path)
+        match blur.blur_type {
+            BlurType::LayerBlur => skia::image_filters::blur(
+                (blur.value * scale, blur.value * scale),
+                None,
+                None,
+                None,
+            ),
+        }
     }
 
     #[allow(dead_code)]
@@ -1249,6 +1311,11 @@ impl Shape {
     pub fn add_shadow(&mut self, shadow: Shadow) {
         self.invalidate_extrect();
         self.shadows.push(shadow);
+    }
+
+    pub fn set_shadows(&mut self, shadows: Vec<Shadow>) {
+        self.invalidate_extrect();
+        self.shadows = shadows;
     }
 
     pub fn clear_shadows(&mut self) {
@@ -1578,12 +1645,20 @@ impl Shape {
             .count()
     }
 
-    pub fn drop_shadow_paints(&self) -> Vec<skia_safe::Paint> {
+    pub fn drop_shadow_paints(&self, max_blur: Option<f32>) -> Vec<skia_safe::Paint> {
         let drop_shadows: Vec<&Shadow> = self.drop_shadows_visible().collect();
 
         drop_shadows
             .into_iter()
             .map(|shadow| {
+                let shadow = match max_blur {
+                    Some(max) if shadow.blur > max => {
+                        let mut c = *shadow;
+                        c.blur = max;
+                        c
+                    }
+                    _ => *shadow,
+                };
                 let mut paint = skia_safe::Paint::default();
                 let filter = shadow.get_drop_shadow_filter();
                 paint.set_image_filter(filter);
@@ -1592,12 +1667,20 @@ impl Shape {
             .collect()
     }
 
-    pub fn inner_shadow_paints(&self) -> Vec<skia_safe::Paint> {
+    pub fn inner_shadow_paints(&self, max_blur: Option<f32>) -> Vec<skia_safe::Paint> {
         let inner_shadows: Vec<&Shadow> = self.inner_shadows_visible().collect();
 
         inner_shadows
             .into_iter()
             .map(|shadow| {
+                let shadow = match max_blur {
+                    Some(max) if shadow.blur > max => {
+                        let mut c = *shadow;
+                        c.blur = max;
+                        c
+                    }
+                    _ => *shadow,
+                };
                 let mut paint = skia_safe::Paint::default();
                 let filter = shadow.get_inner_shadow_filter();
                 paint.set_image_filter(filter);

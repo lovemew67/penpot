@@ -36,10 +36,14 @@
 ;; | 48     | 24   | transform    | 6 × f32 LE (a,b,c,d,e,f)          |
 ;; | 72     | 16   | selrect      | 4 × f32 LE (x1,y1,x2,y2)          |
 ;; | 88     | 16   | corners      | 4 × f32 LE (r1,r2,r3,r4)          |
+;; | 104    | 1    | blur_hidden  | u8 (0 = visible, !0 = hidden)     |
+;; | 105    | 1    | blur_type    | u8 (0 = layer-blur)               |
+;; | 106    | 2    | blur_pad     | -                                 |
+;; | 108    | 4    | blur_value   | f32 LE (0.0 = no blur)            |
 ;; |--------|------|--------------|-----------------------------------|
-;; | Total  | 104  |              |                                   |
+;; | Total  | 112  |              |                                   |
 
-(def ^:const BASE-PROPS-SIZE 104)
+(def ^:const BASE-PROPS-SIZE 112)
 (def ^:const FLAG-CLIP-CONTENT 0x01)
 (def ^:const FLAG-HIDDEN 0x02)
 (def ^:const CONSTRAINT-NONE 0xFF)
@@ -187,6 +191,18 @@
       (.setFloat32 dview (+ offset 92) r2 true)
       (.setFloat32 dview (+ offset 96) r3 true)
       (.setFloat32 dview (+ offset 100) r4 true)
+
+  ;; Write blur fields (offset 104..111)
+  ;; Layout in Rust: u8 hidden, u8 blur_type, 2 bytes padding, f32 value
+  (let [blur (get shape :blur)]
+    (when (some? blur)
+      (let [bt     (-> blur :type sr/translate-blur-type)
+        hidden (if (:hidden blur) 1 0)
+        value  (d/nilv (:value blur) 0.0)]
+    (.setUint8 dview (+ offset 104) hidden)
+    (.setUint8 dview (+ offset 105) bt)
+    ;; padding bytes at 106,107 left as zero
+    (.setFloat32 dview (+ offset 108) value true))))
 
       (h/call wasm/internal-module "_set_shape_base_props")
 

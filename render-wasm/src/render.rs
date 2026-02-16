@@ -272,6 +272,10 @@ pub(crate) struct RenderState {
     pub render_request_id: Option<i32>,
     // Indicates whether the rendering process has pending frames.
     pub render_in_progress: bool,
+    /// When true, visible tiles are allowed to yield across frames (progressive
+    /// rendering). This is set when the Target surface has been primed with
+    /// cached content so that un-rendered tiles still show something.
+    progressive_render: bool,
     // Stack of nodes pending to be rendered.
     pending_nodes: Vec<NodeRenderState>,
     pub current_tile: Option<tiles::Tile>,
@@ -299,6 +303,12 @@ pub(crate) struct RenderState {
     pub preview_mode: bool,
 }
 
+/// Maximum cache surface dimension in pixels.
+/// Prevents GPU memory exhaustion (and WebGL context loss) at high zoom
+/// levels where the tile grid can grow very large.
+/// 8192 × 8192 × 4 bytes ≈ 256 MB, which is safe for most GPUs.
+const MAX_CACHE_DIMENSION: i32 = 8192;
+
 pub fn get_cache_size(viewbox: Viewbox, scale: f32) -> skia::ISize {
     // First we retrieve the extended area of the viewport that we could render.
     let TileRect(isx, isy, iex, iey) = tiles::get_tiles_for_viewbox_with_interest(
@@ -311,11 +321,9 @@ pub fn get_cache_size(viewbox: Viewbox, scale: f32) -> skia::ISize {
     let dy = if isy.signum() != iey.signum() { 1 } else { 0 };
 
     let tile_size = tiles::TILE_SIZE;
-    (
-        ((iex - isx).abs() + dx) * tile_size as i32,
-        ((iey - isy).abs() + dy) * tile_size as i32,
-    )
-        .into()
+    let w = (((iex - isx).abs() + dx) * tile_size as i32).min(MAX_CACHE_DIMENSION);
+    let h = (((iey - isy).abs() + dy) * tile_size as i32).min(MAX_CACHE_DIMENSION);
+    (w, h).into()
 }
 
 impl RenderState {
@@ -350,6 +358,7 @@ impl RenderState {
             background_color: skia::Color::TRANSPARENT,
             render_request_id: None,
             render_in_progress: false,
+            progressive_render: false,
             pending_nodes: vec![],
             current_tile: None,
             sampling_options,
@@ -664,16 +673,20 @@ impl RenderState {
             .nested_fills
             .last()
             .is_some_and(|fills| !fills.is_empty());
-        let has_inherited_blur = !self.ignore_nested_blurs
+        let has_inherited_blur = !fast_mode
+            && !self.ignore_nested_blurs
             && self.nested_blurs.iter().flatten().any(|blur| {
                 !blur.hidden && blur.blur_type == BlurType::LayerBlur && blur.value > 0.0
             });
+        // In fast mode blur is stripped from shapes, so treat blur as absent
+        // for the direct-render eligibility check.
+        let effective_blur_none = shape.blur.is_none() || fast_mode;
         let can_render_directly = apply_to_current_surface
             && clip_bounds.is_none()
             && offset.is_none()
             && parent_shadows.is_none()
             && !shape.needs_layer()
-            && shape.blur.is_none()
+            && effective_blur_none
             && !has_inherited_blur
             && shape.shadows.is_empty()
             && shape.transform.is_identity()
@@ -784,7 +797,29 @@ impl RenderState {
             shape.to_mut().set_blur(None);
         }
         if fast_mode {
-            shape.to_mut().set_blur(None);
+            // In fast mode (pan/zoom), strip blur entirely for individual shapes.
+            // Each blur requires an expensive offscreen filter-surface pass
+            // (clear → render → composite), so with many blurred shapes (e.g. 100)
+            // even clamped blur values cause significant thread blocking.
+            // The tile cache already shows the previously-blurred content, so
+            // removing blur during interaction is visually acceptable. The
+            // settling pass will restore blur at reduced quality, followed by
+            // a full-quality re-render.
+            if shape.blur.is_some() {
+                shape.to_mut().set_blur(None);
+            }
+        } else if self.options.is_settling_mode() {
+            // In settling mode (first render after pan/zoom ends) we allow
+            // blur but clamp it to a small value so the visible tiles
+            // render quickly. A full-quality re-render is scheduled after.
+            const SETTLING_MAX_BLUR: f32 = 4.0;
+            if let Some(ref blur) = shape.blur {
+                if !blur.hidden && blur.value > SETTLING_MAX_BLUR {
+                    let mut clamped = *blur;
+                    clamped.value = SETTLING_MAX_BLUR;
+                    shape.to_mut().set_blur(Some(clamped));
+                }
+            }
         }
 
         let center = shape.center();
@@ -869,13 +904,18 @@ impl RenderState {
                         );
                     }
                 } else {
-                    let mut drop_shadows = shape.drop_shadow_paints();
+                    let max_shadow_blur = if self.options.is_settling_mode() {
+                        Some(4.0_f32)
+                    } else {
+                        None
+                    };
+                    let mut drop_shadows = shape.drop_shadow_paints(max_shadow_blur);
 
                     if let Some(inherited_shadows) = self.get_inherited_drop_shadows() {
                         drop_shadows.extend(inherited_shadows);
                     }
 
-                    let inner_shadows = shape.inner_shadow_paints();
+                    let inner_shadows = shape.inner_shadow_paints(max_shadow_blur);
                     let blur_filter = shape.image_filter(1.);
                     let mut paragraphs_with_shadows =
                         text_content.paragraph_builder_group_from_text(Some(true));
@@ -1032,7 +1072,12 @@ impl RenderState {
                         Some(strokes_surface_id),
                         antialias,
                     );
-                    if !fast_mode {
+                    if !self.options.is_fast_mode() {
+                        let max_shadow_blur = if self.options.is_settling_mode() {
+                            Some(4.0)
+                        } else {
+                            None
+                        };
                         for stroke in &visible_strokes {
                             shadows::render_stroke_inner_shadows(
                                 self,
@@ -1040,17 +1085,24 @@ impl RenderState {
                                 stroke,
                                 antialias,
                                 innershadows_surface_id,
+                                max_shadow_blur,
                             );
                         }
                     }
                 }
 
-                if !fast_mode {
+                if !self.options.is_fast_mode() {
+                    let max_shadow_blur = if self.options.is_settling_mode() {
+                        Some(4.0)
+                    } else {
+                        None
+                    };
                     shadows::render_fill_inner_shadows(
                         self,
                         shape,
                         antialias,
                         innershadows_surface_id,
+                        max_shadow_blur,
                     );
                 }
                 // bools::debug_render_bool_paths(self, shape, shapes, modifiers, structure);
@@ -1175,6 +1227,37 @@ impl RenderState {
         performance::begin_measure!("start_render_loop");
 
         self.reset_canvas();
+
+        // When we have valid cached content (from a previous render or
+        // settling pass), prime the Target surface with it. This lets
+        // visible tiles yield across frames without showing empty
+        // background — un-rendered tiles display the cached content until
+        // they are individually re-rendered at the current quality level.
+        let has_valid_cache = self.cached_viewbox.area.width() > 0.0;
+        self.progressive_render = has_valid_cache;
+        if has_valid_cache {
+            let cached_scale = self.get_cached_scale();
+            let navigate_zoom = self.viewbox.zoom / self.cached_viewbox.zoom;
+            let TileRect(start_tile_x, start_tile_y, _, _) =
+                tiles::get_tiles_for_viewbox_with_interest(
+                    self.cached_viewbox,
+                    VIEWPORT_INTEREST_AREA_THRESHOLD,
+                    cached_scale,
+                );
+            let offset_x = self.viewbox.area.left * self.cached_viewbox.zoom * self.options.dpr();
+            let offset_y = self.viewbox.area.top * self.cached_viewbox.zoom * self.options.dpr();
+            let translate_x = (start_tile_x as f32 * tiles::TILE_SIZE) - offset_x;
+            let translate_y = (start_tile_y as f32 * tiles::TILE_SIZE) - offset_y;
+            {
+                let canvas = self.surfaces.canvas(SurfaceId::Target);
+                canvas.save();
+                canvas.scale((navigate_zoom, navigate_zoom));
+                canvas.translate((translate_x, translate_y));
+            }
+            self.surfaces.draw_cache_to_target();
+            self.surfaces.canvas(SurfaceId::Target).restore();
+        }
+
         let surface_ids = SurfaceId::Strokes as u32
             | SurfaceId::Fills as u32
             | SurfaceId::InnerShadows as u32
@@ -1185,11 +1268,15 @@ impl RenderState {
 
         let viewbox_cache_size = get_cache_size(self.viewbox, scale);
         let cached_viewbox_cache_size = get_cache_size(self.cached_viewbox, scale);
-        // Only resize cache if the new size is larger than the cached size
-        // This avoids unnecessary surface recreations when the cache size decreases
-        if viewbox_cache_size.width > cached_viewbox_cache_size.width
-            || viewbox_cache_size.height > cached_viewbox_cache_size.height
-        {
+        // Resize cache when the new size is larger, or when the current cache
+        // is significantly oversized (more than 2× the needed area). This
+        // prevents the cache from staying at its peak size after zooming out,
+        // which would waste GPU memory.
+        let needs_grow = viewbox_cache_size.width > cached_viewbox_cache_size.width
+            || viewbox_cache_size.height > cached_viewbox_cache_size.height;
+        let needs_shrink = cached_viewbox_cache_size.width > viewbox_cache_size.width * 2
+            || cached_viewbox_cache_size.height > viewbox_cache_size.height * 2;
+        if needs_grow || needs_shrink {
             self.surfaces
                 .resize_cache(viewbox_cache_size, VIEWPORT_INTEREST_AREA_THRESHOLD);
         }
@@ -1247,6 +1334,26 @@ impl RenderState {
             if self.render_in_progress {
                 self.cancel_animation_frame();
                 self.render_request_id = Some(wapi::request_animation_frame!());
+            } else if self.options.is_settling_mode() {
+                // The settling render (reduced-quality) has finished all tiles.
+                // Automatically transition to full quality: clear settling mode,
+                // invalidate tile caches, and start a fresh render loop so that
+                // tiles are re-drawn at full blur quality. This keeps the rAF
+                // chain going without needing a round-trip through JS.
+                //
+                // Use soft_clear so settling-quality tile textures remain
+                // available as visual fallback. This prevents the "bumpy" pop
+                // where plain (unblurred) shapes flash before full-quality
+                // tiles replace them.
+                performance::begin_measure!("settling_to_full_quality");
+                self.options.set_settling_mode(false);
+                self.surfaces.soft_clear_tiles();
+                performance::end_measure!("settling_to_full_quality");
+                // Use a fresh timestamp so the full-quality pass gets its own
+                // time budget instead of inheriting the exhausted budget from
+                // the settling pass.
+                let fresh_ts = performance::get_time();
+                self.start_render_loop(base_object, tree, fresh_ts, false)?;
             } else {
                 performance::end_measure!("render");
             }
@@ -1324,7 +1431,15 @@ impl RenderState {
 
             if let Some(frame_blur) = Self::frame_clip_layer_blur(element) {
                 let scale = self.get_scale();
-                let sigma = frame_blur.value * scale;
+                let mut sigma = frame_blur.value * scale;
+                // In fast mode skip frame-level blur entirely for better
+                // responsiveness; in settling mode clamp to a small value.
+                if self.options.is_fast_mode() {
+                    sigma = 0.0;
+                } else if self.options.is_settling_mode() {
+                    const SETTLING_MAX_SIGMA: f32 = 4.0;
+                    sigma = sigma.min(SETTLING_MAX_SIGMA * scale);
+                }
                 if let Some(filter) = skia::image_filters::blur((sigma, sigma), None, None, None) {
                     paint.set_image_filter(filter);
                 }
@@ -1507,6 +1622,15 @@ impl RenderState {
         let mut transformed_shadow: Cow<Shadow> = Cow::Borrowed(shadow);
         transformed_shadow.to_mut().offset = (0.0, 0.0);
         transformed_shadow.to_mut().color = skia::Color::BLACK;
+
+        // Clamp shadow blur during settling mode for faster rendering.
+        // The filter surface is also at 0.5x resolution (see FAST_MODE_FILTER_DOWNSCALE).
+        if self.options.is_settling_mode() {
+            const SETTLING_MAX_SHADOW_BLUR: f32 = 4.0;
+            if transformed_shadow.blur > SETTLING_MAX_SHADOW_BLUR {
+                transformed_shadow.to_mut().blur = SETTLING_MAX_SHADOW_BLUR;
+            }
+        }
 
         let mut plain_shape = Cow::Borrowed(shape);
         let combined_blur =
@@ -1738,7 +1862,11 @@ impl RenderState {
 
                         let mut transformed_shadow: Cow<Shadow> = Cow::Borrowed(shadow);
                         transformed_shadow.to_mut().color = skia::Color::BLACK;
-                        transformed_shadow.to_mut().blur = transformed_shadow.blur * scale;
+                        let mut blur = transformed_shadow.blur;
+                        if self.options.is_settling_mode() {
+                            blur = blur.min(4.0);
+                        }
+                        transformed_shadow.to_mut().blur = blur * scale;
                         transformed_shadow.to_mut().spread = transformed_shadow.spread * scale;
 
                         let mut new_shadow_paint = skia::Paint::default();
@@ -1879,11 +2007,14 @@ impl RenderState {
                     let element_extrect =
                         extrect.get_or_insert_with(|| transformed_element.extrect(tree, scale));
                     element_extrect.intersects(self.render_area)
-                        && !transformed_element.visually_insignificant(scale, tree)
+                        && !transformed_element
+                            .visually_insignificant_with_extrect(scale, element_extrect)
                 } else {
+                    // For simple shapes without effects, use selrect for both intersection
+                    // and size check — avoids expensive extrect computation entirely.
                     let selrect = transformed_element.selrect();
                     selrect.intersects(self.render_area)
-                        && !transformed_element.visually_insignificant(scale, tree)
+                        && !transformed_element.visually_insignificant_with_extrect(scale, &selrect)
                 };
 
                 if self.options.is_debug_visible() {
@@ -1936,6 +2067,9 @@ impl RenderState {
                     .get_render_context_translation(self.render_area, scale);
 
                 // Skip expensive drop shadow rendering in fast mode (during pan/zoom)
+                // and settling mode (first post-interaction pass). Shadow rendering
+                // is the most expensive operation per shape; deferring it to the
+                // progressive full-quality pass prevents the UI from freezing.
                 let skip_shadows = self.options.is_fast_mode();
 
                 // Skip shadow block when already rendered before the layer (frame_clip_layer_blur)
@@ -2097,11 +2231,18 @@ impl RenderState {
                     }
                 } else {
                     performance::begin_measure!("render_shape_tree::uncached");
-                    // Only allow stopping (yielding) if the current tile is NOT visible.
-                    // This ensures all visible tiles render synchronously before showing,
-                    // eliminating empty squares during zoom. Interest-area tiles can still yield.
+                    // Decide whether this tile can yield (stop mid-render to
+                    // avoid blocking the main thread for too long).
+                    //
+                    // Normally, visible tiles render synchronously to prevent
+                    // empty squares on screen. However, when progressive_render
+                    // is active (the Target was primed with cached content),
+                    // visible tiles can also yield because the cached content
+                    // fills in for tiles that haven't been re-rendered yet.
+                    // This keeps each frame short and responsive even when
+                    // tiles contain heavy blurs.
                     let tile_is_visible = self.tile_viewbox.is_visible(&current_tile);
-                    let can_stop = allow_stop && !tile_is_visible;
+                    let can_stop = allow_stop && (!tile_is_visible || self.progressive_render);
                     let (is_empty, early_return) =
                         self.render_shape_tree_partial_uncached(tree, timestamp, can_stop)?;
 
@@ -2122,11 +2263,20 @@ impl RenderState {
                             );
                         }
                     } else {
-                        self.surfaces.apply_mut(SurfaceId::Target as u32, |s| {
-                            let mut paint = skia::Paint::default();
-                            paint.set_color(self.background_color);
-                            s.canvas().draw_rect(tile_rect, &paint);
-                        });
+                        // Tile is empty — try to show a soft-cleared fallback tile
+                        // (e.g. from a settling pass) instead of plain background.
+                        let tile = self.current_tile.unwrap();
+                        if !self.surfaces.draw_cached_tile_fallback(
+                            tile,
+                            tile_rect,
+                            self.background_color,
+                        ) {
+                            self.surfaces.apply_mut(SurfaceId::Target as u32, |s| {
+                                let mut paint = skia::Paint::default();
+                                paint.set_color(self.background_color);
+                                s.canvas().draw_rect(tile_rect, &paint);
+                            });
+                        }
                     }
                 }
             }
@@ -2167,6 +2317,7 @@ impl RenderState {
         }
 
         self.render_in_progress = false;
+        self.progressive_render = false;
 
         self.surfaces.gc();
 
@@ -2360,8 +2511,10 @@ impl RenderState {
             }
         }
 
-        // Invalidate changed tiles - old content stays visible until new tiles render
-        self.surfaces.remove_cached_tiles(self.background_color);
+        if zoom_changed {
+            // Invalidate changed tiles - old content stays visible until new tiles render
+            self.surfaces.remove_cached_tiles(self.background_color);
+        }
 
         performance::end_measure!("rebuild_tiles_shallow");
     }
@@ -2393,11 +2546,10 @@ impl RenderState {
             }
         }
 
-        // Invalidate changed tiles - old content stays visible until new tiles render
+        // Invalidate all cached tiles - content will be re-rendered at the new state.
+        // remove_cached_tiles already clears the entire tile cache, so no need
+        // to also call remove_cached_tile per tile individually.
         self.surfaces.remove_cached_tiles(self.background_color);
-        for tile in all_tiles {
-            self.remove_cached_tile(tile);
-        }
         performance::end_measure!("rebuild_tiles");
     }
 

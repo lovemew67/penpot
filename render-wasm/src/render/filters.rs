@@ -2,6 +2,12 @@ use skia_safe::{self as skia, ImageFilter, Rect};
 
 use super::{RenderState, SurfaceId};
 
+/// Extra downscale factor applied to the filter surface during fast mode
+/// (pan/zoom interactions). Rendering blurred content at half resolution
+/// is virtually indistinguishable while the viewport is moving and cuts
+/// GPU fill-rate / shader work significantly.
+const FAST_MODE_FILTER_DOWNSCALE: f32 = 0.5;
+
 /// Composes two image filters, returning a combined filter if both are present,
 /// or the individual filter if only one is present, or None if neither is present.
 ///
@@ -87,7 +93,7 @@ where
     let bounds_height = bounds.height().ceil().max(1.0) as i32;
 
     // Calculate scale factor if bounds exceed filter surface size
-    let scale = if bounds_width > filter_width || bounds_height > filter_height {
+    let mut scale = if bounds_width > filter_width || bounds_height > filter_height {
         let scale_x = filter_width as f32 / bounds_width as f32;
         let scale_y = filter_height as f32 / bounds_height as f32;
         // Use the smaller scale to ensure everything fits
@@ -95,6 +101,14 @@ where
     } else {
         1.0
     };
+
+    // In fast mode or settling mode (pan/zoom or post-interaction first pass)
+    // apply an additional downscale so that blur filter surfaces are rendered at
+    // lower resolution. The compositing step scales the result back up, trading
+    // a small amount of fidelity for a large reduction in GPU work.
+    if render_state.options.is_reduced_quality() {
+        scale = (scale * FAST_MODE_FILTER_DOWNSCALE).max(0.1);
+    }
 
     {
         let canvas = render_state.surfaces.canvas(filter_id);

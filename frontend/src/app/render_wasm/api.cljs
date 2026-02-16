@@ -8,6 +8,7 @@
   "A WASM based render API"
   (:require
    ["react-dom/server" :as rds]
+   [app.common.buffer :as buf]
    [app.common.data :as d]
    [app.common.data.macros :as dm]
    [app.common.exceptions :as ex]
@@ -495,7 +496,23 @@
           (mapcat get-fill-images)
           (map #(process-fill-image shape-id % thumbnail?))))))
 
+(defn- pending-fill-images
+  "Return pending image fetches for fill image-ids without re-sending data to WASM."
+  [shape-id image-ids thumbnail?]
+  (keep (fn [id]
+          (let [buffer        (uuid/get-u32 id)
+                cached-image? (h/call wasm/internal-module "_is_image_cached"
+                                      (aget buffer 0)
+                                      (aget buffer 1)
+                                      (aget buffer 2)
+                                      (aget buffer 3)
+                                      thumbnail?)]
+            (when (zero? cached-image?)
+              (fetch-image shape-id id thumbnail?))))
+        image-ids))
+
 (defn set-shape-fills
+  "Write fills to WASM and return pending image fetches."
   [shape-id fills thumbnail?]
   (if (empty? fills)
     (h/call wasm/internal-module "_clear_shape_fills")
@@ -510,24 +527,73 @@
       (h/call wasm/internal-module "_set_shape_fills")
 
       ;; load images for image fills if not cached
-      (keep (fn [id]
-              (let [buffer        (uuid/get-u32 id)
-                    cached-image? (h/call wasm/internal-module "_is_image_cached"
-                                          (aget buffer 0)
-                                          (aget buffer 1)
-                                          (aget buffer 2)
-                                          (aget buffer 3)
-                                          thumbnail?)]
-                (when (zero? cached-image?)
-                  (fetch-image shape-id id thumbnail?))))
+      (pending-fill-images shape-id (types.fills/get-image-ids fills) thumbnail?))))
 
-            (types.fills/get-image-ids fills)))))
+(defn set-shape-fills-data
+  "Write fills data to WASM (no image fetching). Returns the coerced fills for later image checks."
+  [fills]
+  (if (empty? fills)
+    (do (h/call wasm/internal-module "_clear_shape_fills") nil)
+    (let [fills  (types.fills/coerce fills)
+          offset (mem/alloc->offset-32 (types.fills/get-byte-size fills))
+          heap   (mem/get-heap-u32)]
+      (types.fills/write-to fills heap offset)
+      (h/call wasm/internal-module "_set_shape_fills")
+      fills)))
+
+(def ^:const STROKE-ENTRY-U8-SIZE
+  "Per-stroke binary entry: 4 bytes header (kind, style, cap-start, cap-end)
+   + 4 bytes width (f32) + FILL-U8-SIZE bytes fill data."
+  (+ 8 types.fills.impl/FILL-U8-SIZE))
+
+(defn- translate-stroke-kind
+  "Translate stroke alignment keyword to binary kind value.
+   Must match RawStrokeKind repr(u8) in strokes.rs."
+  [align]
+  (case align
+    :inner 1
+    :outer 2
+    0)) ;; center (default)
+
+(defn- pending-stroke-images
+  "Return pending image fetches for stroke images without re-sending data to WASM."
+  [shape-id strokes thumbnail?]
+  (into []
+        (keep (fn [stroke]
+                (when-let [image (:stroke-image stroke)]
+                  (let [image-id      (get image :id)
+                        buffer        (uuid/get-u32 image-id)
+                        cached-image? (h/call wasm/internal-module "_is_image_cached"
+                                              (aget buffer 0) (aget buffer 1)
+                                              (aget buffer 2) (aget buffer 3)
+                                              thumbnail?)]
+                    (when (zero? cached-image?)
+                      (fetch-image shape-id image-id thumbnail?))))))
+        strokes))
 
 (defn set-shape-strokes
+  "Write strokes to WASM and return pending image fetches."
   [shape-id strokes thumbnail?]
-  (h/call wasm/internal-module "_clear_shape_strokes")
-  (keep (fn [stroke]
-          (let [opacity   (or (:stroke-opacity stroke) 1.0)
+  (if (empty? strokes)
+    (h/call wasm/internal-module "_clear_shape_strokes")
+    (let [num-strokes (count strokes)
+          buf-size    (+ 4 (* num-strokes STROKE-ENTRY-U8-SIZE))
+          base-ptr    (mem/alloc buf-size)
+          heap        (mem/get-heap-u8)
+          dview       (js/DataView. (.-buffer heap))]
+
+      ;; Header: stroke count at byte 0
+      (buf/write-byte dview base-ptr num-strokes)
+
+      ;; Write each stroke entry into the shared buffer
+      (loop [i    0
+             remaining (seq strokes)]
+        (when remaining
+          (let [stroke       (first remaining)
+                entry-offset (+ base-ptr 4 (* i STROKE-ENTRY-U8-SIZE))
+                fill-offset  (+ entry-offset 8)
+
+                opacity   (or (:stroke-opacity stroke) 1.0)
                 color     (:stroke-color stroke)
                 gradient  (:stroke-color-gradient stroke)
                 image     (:stroke-image stroke)
@@ -536,37 +602,89 @@
                 style     (-> stroke :stroke-style sr/translate-stroke-style)
                 cap-start (-> stroke :stroke-cap-start sr/translate-stroke-cap)
                 cap-end   (-> stroke :stroke-cap-end sr/translate-stroke-cap)
-                offset    (mem/alloc types.fills.impl/FILL-U8-SIZE)
-                heap      (mem/get-heap-u8)
-                dview     (js/DataView. (.-buffer heap))]
-            (case align
-              :inner (h/call wasm/internal-module "_add_shape_inner_stroke" width style cap-start cap-end)
-              :outer (h/call wasm/internal-module "_add_shape_outer_stroke" width style cap-start cap-end)
-              (h/call wasm/internal-module "_add_shape_center_stroke" width style cap-start cap-end))
+                kind      (translate-stroke-kind align)]
 
+            ;; Stroke header: kind(u8), style(u8), cap-start(u8), cap-end(u8), width(f32)
+            (buf/write-byte  dview (+ entry-offset 0) kind)
+            (buf/write-byte  dview (+ entry-offset 1) style)
+            (buf/write-byte  dview (+ entry-offset 2) cap-start)
+            (buf/write-byte  dview (+ entry-offset 3) cap-end)
+            (buf/write-float dview (+ entry-offset 4) width)
+
+            ;; Fill data (written at fill-offset inside the same buffer)
             (cond
               (some? gradient)
-              (do
-                (types.fills.impl/write-gradient-fill offset dview opacity gradient)
-                (h/call wasm/internal-module "_add_shape_stroke_fill"))
+              (types.fills.impl/write-gradient-fill fill-offset dview opacity gradient)
 
               (some? image)
-              (let [image-id      (get image :id)
-                    buffer        (uuid/get-u32 image-id)
-                    cached-image? (h/call wasm/internal-module "_is_image_cached"
-                                          (aget buffer 0) (aget buffer 1)
-                                          (aget buffer 2) (aget buffer 3)
-                                          thumbnail?)]
-                (types.fills.impl/write-image-fill offset dview opacity image)
-                (h/call wasm/internal-module "_add_shape_stroke_fill")
-                (when (== cached-image? 0)
-                  (fetch-image shape-id image-id thumbnail?)))
+              (types.fills.impl/write-image-fill fill-offset dview opacity image)
 
               (some? color)
-              (do
-                (types.fills.impl/write-solid-fill offset dview opacity color)
-                (h/call wasm/internal-module "_add_shape_stroke_fill")))))
-        strokes))
+              (types.fills.impl/write-solid-fill fill-offset dview opacity color))
+
+            (recur (inc i) (next remaining)))))
+
+      ;; Single WASM call to set all strokes at once
+      (h/call wasm/internal-module "_set_shape_strokes")
+
+      ;; Check image cache and fetch uncached images
+      (pending-stroke-images shape-id strokes thumbnail?))))
+
+(defn set-shape-strokes-data
+  "Write strokes data to WASM (no image fetching)."
+  [strokes]
+  (if (empty? strokes)
+    (h/call wasm/internal-module "_clear_shape_strokes")
+    (let [num-strokes (count strokes)
+          buf-size    (+ 4 (* num-strokes STROKE-ENTRY-U8-SIZE))
+          base-ptr    (mem/alloc buf-size)
+          heap        (mem/get-heap-u8)
+          dview       (js/DataView. (.-buffer heap))]
+
+      ;; Header: stroke count at byte 0
+      (buf/write-byte dview base-ptr num-strokes)
+
+      ;; Write each stroke entry into the shared buffer
+      (loop [i    0
+             remaining (seq strokes)]
+        (when remaining
+          (let [stroke       (first remaining)
+                entry-offset (+ base-ptr 4 (* i STROKE-ENTRY-U8-SIZE))
+                fill-offset  (+ entry-offset 8)
+
+                opacity   (or (:stroke-opacity stroke) 1.0)
+                color     (:stroke-color stroke)
+                gradient  (:stroke-color-gradient stroke)
+                image     (:stroke-image stroke)
+                width     (:stroke-width stroke)
+                align     (:stroke-alignment stroke)
+                style     (-> stroke :stroke-style sr/translate-stroke-style)
+                cap-start (-> stroke :stroke-cap-start sr/translate-stroke-cap)
+                cap-end   (-> stroke :stroke-cap-end sr/translate-stroke-cap)
+                kind      (translate-stroke-kind align)]
+
+            ;; Stroke header
+            (buf/write-byte  dview (+ entry-offset 0) kind)
+            (buf/write-byte  dview (+ entry-offset 1) style)
+            (buf/write-byte  dview (+ entry-offset 2) cap-start)
+            (buf/write-byte  dview (+ entry-offset 3) cap-end)
+            (buf/write-float dview (+ entry-offset 4) width)
+
+            ;; Fill data
+            (cond
+              (some? gradient)
+              (types.fills.impl/write-gradient-fill fill-offset dview opacity gradient)
+
+              (some? image)
+              (types.fills.impl/write-image-fill fill-offset dview opacity image)
+
+              (some? color)
+              (types.fills.impl/write-solid-fill fill-offset dview opacity color))
+
+            (recur (inc i) (next remaining)))))
+
+      ;; Single WASM call to set all strokes at once
+      (h/call wasm/internal-module "_set_shape_strokes"))))
 
 (defn set-shape-svg-attrs
   [attrs]
@@ -863,29 +981,39 @@
   (when (ctl/grid-layout? shape)
     (set-grid-layout shape)))
 
+;; Shadow binary layout constants (must match Rust RawShadowData):
+;; 24 bytes per shadow: color(u32) + blur(f32) + spread(f32) + x(f32) + y(f32) + style(u8) + hidden(u8) + padding(2)
+(def ^:const SHADOW-ENTRY-SIZE 24)
+(def ^:const SHADOW-HEADER-SIZE 4)
+
 (defn set-shape-shadows
   [shadows]
-  (h/call wasm/internal-module "_clear_shape_shadows")
-
-  (run! (fn [shadow]
-          (let [color  (get shadow :color)
-                blur   (get shadow :blur)
+  (if (or (nil? shadows) (empty? shadows))
+    (h/call wasm/internal-module "_clear_shape_shadows")
+    (let [n      (count shadows)
+          size   (+ SHADOW-HEADER-SIZE (* n SHADOW-ENTRY-SIZE))
+          offset (mem/alloc size)
+          heap   (mem/get-heap-u8)
+          dview  (js/DataView. (.-buffer heap))]
+      ;; Header: shadow count in first byte
+      (.setUint8 dview offset n)
+      ;; Write each shadow entry
+      (loop [i 0, shadows (seq shadows)]
+        (when shadows
+          (let [shadow (first shadows)
+                base   (+ offset SHADOW-HEADER-SIZE (* i SHADOW-ENTRY-SIZE))
+                color  (get shadow :color)
                 rgba   (sr-clr/hex->u32argb (get color :color)
-                                            (get color :opacity))
-                hidden (get shadow :hidden)
-                x      (get shadow :offset-x)
-                y      (get shadow :offset-y)
-                spread (get shadow :spread)
-                style  (get shadow :style)]
-            (h/call wasm/internal-module "_add_shape_shadow"
-                    rgba
-                    blur
-                    spread
-                    x
-                    y
-                    (sr/translate-shadow-style style)
-                    hidden)))
-        shadows))
+                                            (get color :opacity))]
+            (.setUint32 dview base rgba true)
+            (.setFloat32 dview (+ base 4) (get shadow :blur) true)
+            (.setFloat32 dview (+ base 8) (get shadow :spread) true)
+            (.setFloat32 dview (+ base 12) (get shadow :offset-x) true)
+            (.setFloat32 dview (+ base 16) (get shadow :offset-y) true)
+            (.setUint8 dview (+ base 20) (sr/translate-shadow-style (get shadow :style)))
+            (.setUint8 dview (+ base 21) (if (get shadow :hidden) 1 0))
+            (recur (inc i) (next shadows)))))
+      (h/call wasm/internal-module "_set_shape_shadows"))))
 
 (defn fonts-from-text-content [content fallback-fonts-only?]
   (let [paragraph-set (first (get content :children))
@@ -962,6 +1090,12 @@
             ;; to prevent errors when navigating quickly
             (when wasm/context-initialized?
               (perf/begin-measure "render-finish")
+              ;; set_view_end clears fast mode, enters settling mode,
+              ;; rebuilds tiles and syncs the viewbox. The settling render
+              ;; uses reduced blur quality so visible tiles appear quickly.
+              ;; When all settling tiles finish, the Rust side automatically
+              ;; transitions to full quality (clears settling, invalidates
+              ;; caches, starts a new render loop) — no JS round-trip needed.
               (h/call wasm/internal-module "_set_view_end")
               (render ts)
               (perf/end-measure "render-finish")))]
@@ -1043,15 +1177,21 @@
     (set-shape-layout shape)
     (set-layout-data shape)
 
-    (let [pending_thumbnails (into [] (concat
+    ;; Write fills & strokes data to WASM once (identical for both resolutions)
+    (let [coerced-fills (set-shape-fills-data fills)
+          _             (set-shape-strokes-data strokes)
+          fill-image-ids (when coerced-fills (types.fills/get-image-ids coerced-fills))
+
+          ;; Collect pending image fetches per resolution (only the image cache check differs)
+          pending_thumbnails (into [] (concat
                                        (set-shape-text-content id content)
                                        (set-shape-text-images id content true)
-                                       (set-shape-fills id fills true)
-                                       (set-shape-strokes id strokes true)))
+                                       (pending-fill-images id fill-image-ids true)
+                                       (pending-stroke-images id strokes true)))
           pending_full (into [] (concat
                                  (set-shape-text-images id content false)
-                                 (set-shape-fills id fills false)
-                                 (set-shape-strokes id strokes false)))]
+                                 (pending-fill-images id fill-image-ids false)
+                                 (pending-stroke-images id strokes false)))]
       (perf/end-measure "set-object")
       {:thumbnails pending_thumbnails
        :full pending_full})))

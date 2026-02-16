@@ -28,6 +28,27 @@ impl RenderOptions {
         }
     }
 
+    /// Settling mode: transitional reduced-quality render after pan/zoom ends.
+    /// Blur is kept but rendered at reduced resolution/sigma so the first
+    /// post-interaction frame appears quickly. A follow-up full-quality render
+    /// is then scheduled.
+    pub fn is_settling_mode(&self) -> bool {
+        self.flags & options::SETTLING_MODE == options::SETTLING_MODE
+    }
+
+    pub fn set_settling_mode(&mut self, enabled: bool) {
+        if enabled {
+            self.flags |= options::SETTLING_MODE;
+        } else {
+            self.flags &= !options::SETTLING_MODE;
+        }
+    }
+
+    /// Returns true if blur quality should be reduced (either fast mode or settling mode).
+    pub fn is_reduced_quality(&self) -> bool {
+        self.is_fast_mode() || self.is_settling_mode()
+    }
+
     pub fn dpr(&self) -> f32 {
         self.dpr.unwrap_or(1.0)
     }

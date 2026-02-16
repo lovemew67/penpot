@@ -263,6 +263,9 @@ pub extern "C" fn set_view_start() {
         }
         performance::begin_measure!("set_view_start");
         state.render_state.options.set_fast_mode(true);
+        // Clear settling mode if a new pan/zoom starts before the
+        // settling→full quality transition completes.
+        state.render_state.options.set_settling_mode(false);
         performance::end_measure!("set_view_start");
     });
 }
@@ -273,6 +276,10 @@ pub extern "C" fn set_view_end() {
         let _end_start = performance::begin_timed_log!("set_view_end");
         performance::begin_measure!("set_view_end");
         state.render_state.options.set_fast_mode(false);
+        // Enter settling mode: the first render pass will use reduced blur
+        // quality so visible tiles appear quickly. The frontend should call
+        // `settle_view_end` after this render to schedule a full-quality pass.
+        state.render_state.options.set_settling_mode(true);
         state.render_state.cancel_animation_frame();
 
         // Update tile_viewbox first so that get_tiles_for_shape uses the correct interest area
@@ -302,6 +309,24 @@ pub extern "C" fn set_view_end() {
         {
             let total_time = performance::get_time() - unsafe { VIEW_INTERACTION_START };
             performance::console_log!("[PERF] view_interaction: {}ms", total_time);
+        }
+    });
+}
+
+/// Called by the frontend after the settling render pass completes.
+/// Turns off settling mode, invalidates all tile caches so that the
+/// next render produces full-quality output.
+#[no_mangle]
+pub extern "C" fn settle_view_end() {
+    with_state_mut!(state, {
+        if state.render_state.options.is_settling_mode() {
+            performance::begin_measure!("settle_view_end");
+            state.render_state.options.set_settling_mode(false);
+            // Soft-invalidate cached tiles so the next render pass
+            // re-draws them at full quality while keeping settling
+            // textures as visual fallback to avoid popping.
+            state.render_state.surfaces.soft_clear_tiles();
+            performance::end_measure!("settle_view_end");
         }
     });
 }
