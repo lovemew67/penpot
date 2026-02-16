@@ -449,7 +449,7 @@
                   (assoc "font/ttf" sfnt)))))
 
         (contains? current "font/woff2")
-        (let [data   (get input "font/woff2")
+        (let [data    (get input "font/woff2")
               foutput (woff2->sfnt data)]
           (when-not foutput
             (ex/raise :type :validation
@@ -469,4 +469,4 @@
                     (assoc "font/otf" (ttf->otf sfnt))
                     (update "font/woff" gen-if-nil #(ttf-or-otf->woff sfnt)))))
             (finally
-              (io/delete-file! foutput))))))))
+              (fs/delete foutput))))))))
