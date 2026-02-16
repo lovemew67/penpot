@@ -122,6 +122,7 @@ pub struct TextEditorState {
     pub theme: TextEditorTheme,
     pub selection: TextSelection,
     pub is_active: bool,
+    pub is_selection_active: bool,
     pub active_shape_id: Option<Uuid>,
     pub cursor_visible: bool,
     pub last_blink_time: f64,
@@ -139,6 +140,7 @@ impl TextEditorState {
             },
             selection: TextSelection::new(),
             is_active: false,
+            is_selection_active: false,
             active_shape_id: None,
             cursor_visible: true,
             last_blink_time: 0.0,
@@ -152,6 +154,7 @@ impl TextEditorState {
         self.cursor_visible = true;
         self.last_blink_time = 0.0;
         self.selection = TextSelection::new();
+        self.is_selection_active = false;
         self.pending_events.clear();
     }
 
@@ -159,7 +162,16 @@ impl TextEditorState {
         self.is_active = false;
         self.active_shape_id = None;
         self.cursor_visible = false;
+        self.is_selection_active = false;
         self.pending_events.clear();
+    }
+
+    pub fn start_selection(&mut self) {
+        self.is_selection_active = true;
+    }
+
+    pub fn stop_selection(&mut self) {
+        self.is_selection_active = false;
     }
 
     pub fn set_caret_from_position(&mut self, position: TextPositionWithAffinity) {

@@ -283,22 +283,6 @@
   [attrs]
   (text-editor/apply-style-to-selection attrs use-shape set-shape-text-content))
 
-(defn update-text-rect!
-  [id]
-  (when wasm/context-initialized?
-    (mw/emit!
-     {:cmd :index/update-text-rect
-      :page-id (:current-page-id @st/state)
-      :shape-id id
-      :dimensions (get-text-dimensions id)})))
-
-(defn- ensure-text-content
-  "Guarantee that the shape always sends a valid text tree to WASM. When the
-  content is nil (freshly created text) we fall back to
-  tc/default-text-content so the renderer receives typography information."
-  [content]
-  (or content (tc/v2-default-text-content)))
-
 (defn set-parent-id
   [id]
   (let [buffer (uuid/get-u32 id)]
@@ -942,7 +926,7 @@
 
           (if fallback-fonts-only? updated-fonts fallback-fonts))))))
 
-(defn set-shape-text-content
+#_(defn set-shape-text-content
   "This function sets shape text content and returns a stream that loads the needed fonts asynchronously"
   [shape-id content]
 

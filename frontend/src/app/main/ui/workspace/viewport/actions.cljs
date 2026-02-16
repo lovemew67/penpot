@@ -75,6 +75,7 @@
                shift? (kbd/shift? native-event)
                alt?   (kbd/alt? native-event)
                mod?   (kbd/mod? native-event)
+               off-pt (dom/get-offset-position native-event)
 
                left-click?   (and (not panning) (dom/left-mouse? event))
                middle-click? (and (not panning) (dom/middle-mouse? event))]
@@ -93,6 +94,9 @@
              (do
                (st/emit! (mse/->MouseEvent :down ctrl? shift? alt? meta?)
                          ::dwsp/interrupt)
+
+               (when (wasm.api/text-editor-is-active?)
+                 (wasm.api/text-editor-pointer-down (.-x off-pt) (.-y off-pt)))
 
                (when (and (not= edition id) (or text-editing? grid-editing?))
                  (st/emit! (dw/clear-edition-mode))
@@ -328,7 +332,9 @@
 
        (when left-click?
          (st/emit! (mse/->MouseEvent :up ctrl? shift? alt? meta?))
-         (wasm.api/text-editor-pointer-up (.-x off-pt) (.-y off-pt)))
+
+         (when (wasm.api/text-editor-is-active?)
+           (wasm.api/text-editor-pointer-up (.-x off-pt) (.-y off-pt))))
 
        (when middle-click?
          (dom/prevent-default native-event)
@@ -401,6 +407,7 @@
                      (gpt/point 0 0))]
 
          (wasm.api/text-editor-testing-coords (.-x off-pt) (.-y off-pt))
+         (wasm.api/text-editor-pointer-move (.-x off-pt) (.-y off-pt))
 
          (rx/push! move-stream pt)
          (reset! last-position raw-pt)
