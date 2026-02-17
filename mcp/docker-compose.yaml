@@ -1,0 +1,23 @@
+---
+services:
+  penpot-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      # Plugin UI
+      - "4400:4400"
+      # MCP Server HTTP (SSE / Streamable HTTP)
+      - "4401:4401"
+      # MCP WebSocket (Plugin Bridge)
+      - "4402:4402"
+      # REPL Web UI
+      - "4403:4403"
+    environment:
+      PENPOT_MCP_SERVER_LISTEN_ADDRESS: 0.0.0.0
+      PENPOT_MCP_SERVER_ADDRESS: 0.0.0.0
+      PENPOT_MCP_SERVER_PORT: 4401
+      PENPOT_MCP_WEBSOCKET_PORT: 4402
+      PENPOT_MCP_REPL_PORT: 4403
+      PENPOT_MCP_LOG_LEVEL: info
