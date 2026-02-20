@@ -1,0 +1,4 @@
+up:
+	PENPOT_VERSION=2.13.3 PENPOT_MCP_WEBSOCKET_URL=http://192.168.2.185:4402 docker compose up -d
+down:
+	PENPOT_VERSION=2.13.3 PENPOT_MCP_WEBSOCKET_URL=http://192.168.2.185:4402 docker compose down
