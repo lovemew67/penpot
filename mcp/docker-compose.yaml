@@ -23,9 +23,9 @@ x-body-size: &penpot-http-body-size
 x-secret-key: &penpot-secret-key
   PENPOT_SECRET_KEY: BvLHSNallYzXuVq5vCk5qd21yKImxeWliNGlpdCuWDCjEfAY71lncahAlm37vqN7eWnVftB9EP2GpeKDySNnMQ
 
-volumes:
-  penpot_postgres_v15:
-  penpot_assets:
+# volumes:
+#   penpot_postgres_v15:
+#   penpot_assets:
 
 services:
   ## A mailcatch service, used as temporal SMTP server. You can access via HTTP to the
@@ -55,7 +55,7 @@ services:
       - POSTGRES_USER=penpot
       - POSTGRES_PASSWORD=penpot
     volumes:
-      - penpot_postgres_v15:/var/lib/postgresql/data
+      - ./data/pgdata:/var/lib/postgresql/data
 
   penpot-valkey:
     image: valkey/valkey:8.1
@@ -113,7 +113,7 @@ services:
       PENPOT_SMTP_TLS: false
       PENPOT_SMTP_SSL: false
     volumes:
-      - penpot_assets:/opt/data/assets
+      - ./data/assets:/opt/data/assets
     depends_on:
       penpot-postgres:
         condition: service_healthy
@@ -142,7 +142,7 @@ services:
     environment:
       <<: [*penpot-flags, *penpot-http-body-size]
     volumes:
-      - penpot_assets:/opt/data/assets
+      - ./data/assets:/opt/data/assets
     depends_on:
       - penpot-backend
       - penpot-exporter
@@ -169,3 +169,10 @@ services:
       PENPOT_MCP_LOG_LEVEL: info
     depends_on:
       - penpot-frontend
+
+  # cloudflare-tunnel:
+  #   image: cloudflare/cloudflared:2026.2.0
+  #   restart: always
+  #   environment:
+  #     TUNNEL_TOKEN: ${MCP_SERVER_TUNNEL_TOKEN}
+  #   command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run

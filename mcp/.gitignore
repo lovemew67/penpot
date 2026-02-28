@@ -5,6 +5,7 @@ dist
 *.orig
 temp
 *.tsbuildinfo
+data/
 
 # Log files
 logs/
