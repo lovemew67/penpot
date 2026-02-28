@@ -148,7 +148,7 @@ services:
       - penpot-exporter
 
   penpot-mcp:
-    image: lovemew67/penpot-mcp:2.13.3.11
+    image: lovemew67/penpot-mcp:2.13.3
     restart: always
     ports:
       # Plugin UI
